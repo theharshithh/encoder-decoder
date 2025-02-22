@@ -28,15 +28,15 @@ class PE(nn.Module):
         pe = pe.unsqueeze(0) # (1, seq_len, d_model) (b,t,c)
         self.register_buffer('pe', pe) #saved in state, not calc always
 
-
+    @torch.no_grad()
     def forward(self, x):
         # self.pe -> (1, t, c)
-        x = x + self.pe[:, :x.shape[1], :].requires_grad(False)
-        #self.pe[:, :x.shape[1]] -> keeps b, reduces the t dimention by cutting by :x.shape[1]
+        pe_slice = self.pe[:, :x.shape[1], :]
+        x = x + pe_slice
         return self.dropout(x)
 
 class LayerNorm(nn.Module):
-    def __init__(self, d_model, eps=1e-8):
+    def __init__(self, d_model=512, eps=1e-8):
         super().__init__()
         self.eps = eps
         self.alpha = nn.Parameter(torch.ones(d_model)) # mul
@@ -97,25 +97,25 @@ class Attention(nn.Module):
 
     def forward(self,q,k,v, mask):
         #q -> (b,seq_len,d_model)
-        query = self.wq(k) # (b, seq_len, d_model) * (d_model, d_model) ->  (b, seq_len, d_model)
-        key = self.wk(k) # (b, seq_len, d_model) * (d_model, d_model) ->  (b, seq_len, d_model)
-        value = self.wv(v)
+        query = self.W_q(q) # (b, seq_len, d_model) * (d_model, d_model) ->  (b, seq_len, d_model)
+        key = self.W_k(k) # (b, seq_len, d_model) * (d_model, d_model) ->  (b, seq_len, d_model)
+        value = self.W_v(v)
         # (b, seq_len, d_model) -> (b, seq_len, num_heads, dk) ->  transpose-> (batch, h, seq_len, dk)
         query = query.view(query.shape[0], query.shape[1], self.num_heads, self.d_k).transpose(1,2) # (b, seq_len, num_heads, d_k)
         key = key.view(key.shape[0], key.shape[1], self.num_heads, self.d_k).transpose(1,2) # (b, seq_len, num_heads, d_k)
-        value = value.view(value.shape[0], value.shape[1], self.num, self.d_k).transpose(1,2) # (b, seq_len, num_heads, d_k)
+        value = value.view(value.shape[0], value.shape[1], self.num_heads, self.d_k).transpose(1,2) # (b, seq_len, num_heads, d_k)
 
         x, self.attention_scores = Attention.attention(query, key, value, mask, self.dropout)
         # x -> b, num_heads, seq_len, d_k -> (b, seq_len, num_heads, d_k) -> b, seq_len, d_model
         x = x.transpose(1,2).contiguous().view(x.shape[0], -1, self.d_model)
-        x = self.w_o
+        x = self.w_o(x)
         # x-> b,seq_len, d_model
         return x
 
 class ResidualConnection(nn.Module):
     def __init__(self, dropout):
         super().__init__()
-        self.dropout = nn.Dropout
+        self.dropout = nn.Dropout(dropout)
         self.norm = LayerNorm()
 
     def forward(self, x, sub_layer):
@@ -132,8 +132,8 @@ class EncoderBlock(nn.Module):
         self.residual_connection = nn.ModuleList([ResidualConnection(dropout) for _ in range(2)])
     
     def forward(self,x,src_mask):
-        x = self.residual_connection[0](x, lambda x: self.self_attention_block(x,x,x, src_mask))
-        x = self.residual_connection[1](x, lambda x: self.feed_forward_block)
+        x = self.residual_connection[0](x, lambda x: self.attention_block(x,x,x, src_mask))
+        x = self.residual_connection[1](x, lambda x: self.feed_forward_block(x))
         return x
 
 
@@ -156,12 +156,12 @@ class DecoderBlock(nn.Module):
         self.cross_attention_block = cross_attention_block
         self.feed_forward_block = feed_forward
         self.dropout = dropout
-        self.residul_connection = nn.ModuleList([ResidualConnection(dropout for _ in range(3))])
+        self.residual_connection = nn.ModuleList([ResidualConnection(dropout) for _ in range(3)])
 
     def forward(self, x, encoder_op, src_mask, tgt_mask):
         x = self.residual_connection[0](x, lambda x: self.self_attention_block(x,x,x, tgt_mask))
         x = self.residual_connection[1](x, lambda x: self.cross_attention_block(x,encoder_op, encoder_op, src_mask))
-        x = self.residual_connection[2](x, self.feed_forward_block)
+        x = self.residual_connection[2](x, lambda x: self.feed_forward_block(x))
 
         return x
 
@@ -179,7 +179,7 @@ class Decoder(nn.Module):
 
 class ProjectionLayer(nn.Module):
     def __init__(self, d_model, vocab_size):
-        super().__init()
+        super().__init__()
         self.proj = nn.Linear(d_model, vocab_size)
 
     def forward(self, x):

@@ -50,9 +50,9 @@ class BilingualDataset(Dataset):
         self.tgt_lang = tgt_lang
         self.seq_len = seq_len
 
-        self.sos_token = torch.Tensor([tokeniser_src.token_to_id("[SOS]")], dtype=torch.int64)
-        self.eos_token = torch.Tensor([tokeniser_src.token_to_id("[EOS]")], dtype=torch.int64)
-        self.pad_token = torch.Tensor([tokeniser_src.token_to_id("[PAD]")], dtype=torch.int64)
+        self.sos_token = torch.tensor([tokeniser_src.token_to_id("[SOS]")], dtype=torch.int64)
+        self.eos_token = torch.tensor([tokeniser_src.token_to_id("[EOS]")], dtype=torch.int64)
+        self.pad_token = torch.tensor([tokeniser_src.token_to_id("[PAD]")], dtype=torch.int64)
 
     def __len__(self):
         return len(self.ds)
@@ -70,45 +70,45 @@ class BilingualDataset(Dataset):
         enc_input_tokens = self.tokeniser_src.encode(src_text).ids
         # enc_input_tokens = [34, 56]
         dec_input_tokens = self.tokeniser_tgt.encode(tgt_text).ids
-        # dec_input_tokens = [21, 43, 67]
-        enc_no_of_pad_tokens = self.seq_len-len(enc_input_tokens)
-        # enc_no_of_pad_tokens = 10-2 = 8
-        dec_no_of_pad_tokens = self.seq_len-len(dec_input_tokens)
-        # dec_no_of_pad_tokens = 10-3 = 7
-
-        if enc_no_of_pad_tokens< 0  or dec_no_of_pad_tokens<0:
-            raise ValueError('Sentance is too big')
+        
+        # Account for SOS and EOS tokens in the length calculation
+        enc_no_of_pad_tokens = self.seq_len - len(enc_input_tokens) - 2  # -2 for SOS and EOS
+        # enc_no_of_pad_tokens = 10 - 2 - 2 = 6
+        dec_no_of_pad_tokens = self.seq_len - len(dec_input_tokens) - 1  # -1 for SOS only
+        # dec_no_of_pad_tokens = 10 - 1 - 1 = 8
+        
+        if enc_no_of_pad_tokens < 0 or dec_no_of_pad_tokens < 0:
+            raise ValueError('Sentence is too long')
         
         encoder_input = torch.cat(
             [
-                self.sos_token, # [15]
-                torch.tensor(enc_input_tokens, dtype=torch.int64), # [34, 56]
-                self.eos_token, # [45]
-                torch.tensor([self.pad_token] * enc_no_of_pad_tokens, dtype=torch.int64) # [0] * 8 = [0, 0, 0, 0, 0, 0, 0, 0]
+                self.sos_token,  # [SOS], size(0) = 1
+                torch.tensor(enc_input_tokens, dtype=torch.int64), # [34, 56], size(0) = 2
+                self.eos_token,  # [EOS], size(0) = 1
+                torch.tensor([self.pad_token] * enc_no_of_pad_tokens, dtype=torch.int64) # [0, 0, 0, 0, 0, 0], size(0) = 6
             ]
         )
         # encoder_input = [15, 34, 56, 45, 0, 0, 0, 0, 0, 0] -> encoder_input.size(0) = 10
-        # for 1d tensors, the no of ele is the size, and default dim 0
         decoder_input = torch.cat(
             [
-                self.sos_token, # [15]
-                torch.tensor(dec_input_tokens, dtype=torch.int64), # [21, 43, 67]
-                torch.tensor([self.pad_token] * dec_no_of_pad_tokens, dtype=torch.int64) # [0] * 7 = [0, 0, 0, 0, 0, 0, 0]
+                self.sos_token,  # [SOS], size(0) = 1
+                torch.tensor(dec_input_tokens, dtype=torch.int64), # [21, 43, 67], size(0) = 3
+                torch.tensor([self.pad_token] * dec_no_of_pad_tokens, dtype=torch.int64) # [0, 0, 0, 0, 0, 0, 0, 0], size(0) = 8
             ]
-        )
+        )   
         # decoder_input = [15, 21, 43, 67, 0, 0, 0, 0, 0, 0] -> decoder_input.size(0) = 10
         
         prediction = torch.cat(
             [
-                torch.tensor(dec_input_tokens, dtype=torch.int64), # [21, 43, 67]
-                self.eos_token, # [45]
-                torch.tensor([self.pad_token] * dec_no_of_pad_tokens, dtype=torch.int64) # [0] * 7 = [0, 0, 0, 0, 0, 0, 0]
+                torch.tensor(dec_input_tokens, dtype=torch.int64), # [21, 43, 67], size(0) = 3
+                self.eos_token, # [45], size(0) = 1
+                torch.tensor([self.pad_token] * dec_no_of_pad_tokens, dtype=torch.int64) # [0] * 7 = [0, 0, 0, 0, 0, 0, 0], size(0) = 7
             ]
         )
         # label = [21, 43, 67, 45, 0, 0, 0, 0, 0, 0] -> label.size(0) = 10
-
+        
         assert encoder_input.size(0) == self.seq_len
-        assert decoder_input.size(0) == self.seq_len # chrcking dims along 
+        assert decoder_input.size(0) == self.seq_len
         assert prediction.size(0) == self.seq_len
 
         return {

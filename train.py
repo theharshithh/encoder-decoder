@@ -82,8 +82,8 @@ def train(config):
 
     optimizer = torch.optim.Adam(model.parameters(), lr=config['lr'], eps=1e-9)
 
-    initial_epoh = 0
-    global_epoch = 0
+    initial_epoch = 0
+    global_step = 0
 
     if config['preload']:
         model_filename = get_weights_file_path(config, config['preload'])
@@ -106,7 +106,7 @@ def train(config):
 
             encoder_op = model.encode(encoder_input, encoder_mask) # (b, seq_len, d_model)
 
-            decoder_op = model.encode(decoder_input, decoder_mask) #(b, seq_len, d_model)
+            decoder_op = model.decode(encoder_op, encoder_mask, decoder_input, decoder_mask) #(b, seq_len, d_model)
 
             projection_op = model.project(decoder_op) # (b, seq_len, tgt_vocab_szie)
 
