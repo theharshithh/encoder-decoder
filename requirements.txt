@@ -29,6 +29,7 @@ packaging==24.2
 pandas==2.2.3
 parso==0.8.4
 pexpect==4.9.0
+pillow==11.1.0
 platformdirs==4.3.6
 prompt-toolkit==3.0.50
 protobuf==5.29.3
@@ -51,6 +52,7 @@ tensorboard-data-server==0.7.2
 tokenizers==0.21.0
 torch==2.6.0
 torch-tb-profiler==0.4.3
+torchvision==0.21.0
 tornado==6.4.2
 tqdm==4.67.1
 traitlets==5.14.3
