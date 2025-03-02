@@ -65,7 +65,7 @@ class FeedForward(nn.Module):
         return x
 
 # multihead attn will have both single head, masked head
-class Attention(nn.Module):
+class MultiHeadAttention(nn.Module):
     def __init__(self, d_model, num_heads, dropout):
         super().__init__()
         self.d_model = d_model
@@ -105,7 +105,7 @@ class Attention(nn.Module):
         key = key.view(key.shape[0], key.shape[1], self.num_heads, self.d_k).transpose(1,2) # (b, seq_len, num_heads, d_k)
         value = value.view(value.shape[0], value.shape[1], self.num_heads, self.d_k).transpose(1,2) # (b, seq_len, num_heads, d_k)
 
-        x, self.attention_scores = Attention.attention(query, key, value, mask, self.dropout)
+        x, self.attention_scores = MultiHeadAttention.attention(query, key, value, mask, self.dropout)
         # x -> b, num_heads, seq_len, d_k -> (b, seq_len, num_heads, d_k) -> b, seq_len, d_model
         x = x.transpose(1,2).contiguous().view(x.shape[0], -1, self.d_model)
         x = self.w_o(x)
@@ -125,7 +125,7 @@ class ResidualConnection(nn.Module):
 
 # residual block -> res_conn += attn+ dropout(norm(x))
 class EncoderBlock(nn.Module):
-    def __init__(self, self_attention_block: Attention, feed_forward_block: FeedForward, dropout: float):
+    def __init__(self, self_attention_block: MultiHeadAttention, feed_forward_block: FeedForward, dropout: float):
         super().__init__()
         self.attention_block = self_attention_block
         self.feed_forward_block = feed_forward_block
@@ -150,7 +150,7 @@ class Encoder(nn.Module):
 
 
 class DecoderBlock(nn.Module):
-    def __init__(self, self_attention_block: Attention, cross_attention_block: Attention, feed_forward: FeedForward, dropout: float):
+    def __init__(self, self_attention_block: MultiHeadAttention, cross_attention_block: MultiHeadAttention, feed_forward: FeedForward, dropout: float):
         super().__init__()
         self.self_attention_block = self_attention_block
         self.cross_attention_block = cross_attention_block
@@ -218,7 +218,7 @@ def build_transformer(src_vocab_size, tgt_vocab_size, src_seq_len, tgt_seq_len, 
     #encoder blk
     encoder_blocks = []
     for _ in range(no_of_layers):
-        encoder_self_attn = Attention(d_model, no_of_heads, dropout)
+        encoder_self_attn = MultiHeadAttention(d_model, no_of_heads, dropout)
         feed_forward = FeedForward(d_model, d_ff, dropout)
         encoder_block = EncoderBlock(encoder_self_attn, feed_forward, dropout)
         encoder_blocks.append(encoder_block)
@@ -226,8 +226,8 @@ def build_transformer(src_vocab_size, tgt_vocab_size, src_seq_len, tgt_seq_len, 
     #decoder blk
     decoder_blocks = []
     for _ in range(no_of_layers):
-        decoder_self_attention = Attention(d_model,no_of_heads, dropout)
-        decoder_cross_attention = Attention(d_model, no_of_heads, dropout)
+        decoder_self_attention = MultiHeadAttention(d_model,no_of_heads, dropout)
+        decoder_cross_attention = MultiHeadAttention(d_model, no_of_heads, dropout)
         feed_forward = FeedForward(d_model, d_ff, dropout)
         decoder_block = DecoderBlock(decoder_self_attention, decoder_cross_attention, feed_forward, dropout)
         decoder_blocks.append(decoder_block)
