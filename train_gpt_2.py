@@ -18,16 +18,17 @@ def get_gpt2_config():
         'tokenizer_file': 'tokenizer_{0}.json',
         'experiment_name': 'runs/gpt2_kannada',
         'lang': 'ka',
-        'seq_len': 128,
-        'batch_size': 64,
-        'd_model': 768,
-        'n_heads': 12,
-        'n_layers': 12,
-        'd_ff': 3072,
+        'seq_len': 1024,    
+        'batch_size': 8,    
+        'd_model': 768,     
+        'n_heads': 12,          
+        'n_layers': 12,      
+        'd_ff': 3072,        
         'dropout': 0.1,
-        'lr': 1e-4,
+        'lr': 2.5e-4,       
         'num_epochs': 20,
-        'preload': None
+        'preload': None,
+        'gradient_accumulation_steps': 4 
     }
 
 class GPT2Model(nn.Module):
@@ -41,6 +42,7 @@ class GPT2Model(nn.Module):
                 self_attention_block=MultiHeadAttention(d_model, n_heads, dropout),
                 cross_attention_block=None,
                 feed_forward=FeedForward(d_model, d_ff, dropout),
+                d_model=d_model,
                 dropout=dropout
             ) for _ in range(n_layers)
         ])
@@ -62,17 +64,11 @@ class GPT2Model(nn.Module):
             module.alpha.data.fill_(1.0)
             
     def forward(self, x, mask=None):
-        batch_size, seq_len = x.size()
-        
-        positions = torch.arange(0, seq_len, dtype=torch.long, device=x.device)
-        positions = positions.unsqueeze(0).expand(batch_size, -1)
-        
-        token_embed = self.token_embedding(x)
-        position_embed = self.position_embedding(positions)
-        x = self.dropout(token_embed + position_embed)
+        x = self.token_embedding(x)
+        x = self.position_embedding(x)
         
         for block in self.decoder_blocks:
-            x = block(x, mask)
+            x = block(x, None, mask, mask)
         
         x = self.norm(x)
         x = self.projection(x)
@@ -124,21 +120,21 @@ class KannadaLMDataset(Dataset):
             input_tokens = input_tokens + [self.pad_token] * padding_length
             
         input_tensor = torch.tensor(input_tokens, dtype=torch.long)
-        
         target_tensor = torch.tensor(tokens + [self.eos_token] + [self.pad_token] * padding_length, dtype=torch.long)
+
+        attention_mask = (input_tensor != self.pad_token).type(torch.bool)
         
-        mask = (input_tensor != self.pad_token).unsqueeze(0).unsqueeze(0)
-        
+
         seq_len = input_tensor.size(0)
-        causal_mask = torch.tril(torch.ones(seq_len, seq_len)).unsqueeze(0).unsqueeze(0)
+        causal_mask = torch.tril(torch.ones(seq_len, seq_len)).type(torch.bool)
         
-        combined_mask = mask & causal_mask
+        combined_mask = attention_mask.unsqueeze(0) & causal_mask
         
         return {
             "input_ids": input_tensor,
             "labels": target_tensor,
-            "attention_mask": mask,
-            "causal_mask": combined_mask,
+            "attention_mask": attention_mask.unsqueeze(0).unsqueeze(0),
+            "causal_mask": combined_mask.unsqueeze(0),
             "text": text
         }
 
@@ -256,14 +252,19 @@ def train(config):
         d_ff=config['d_ff']
     ).to(device)
     
-    writer = SummaryWriter(config['experiment_name'])
+    scaler = torch.amp.GradScaler(device=device)
+    
+    run_name = f"gpt2_kannada_d{config['d_model']}_h{config['n_heads']}_l{config['n_layers']}"
+    writer = SummaryWriter(f"runs/{run_name}")
+    
+    writer.add_text('hyperparameters', str(config))
     
     optimizer = torch.optim.AdamW(model.parameters(), lr=config['lr'])
-    
     criterion = nn.CrossEntropyLoss(ignore_index=tokenizer.token_to_id("[PAD]"))
     
     global_step = 0
     initial_epoch = 0
+    best_val_loss = float('inf')
     
     if config['preload']:
         model_filename = os.path.join(config['model_folder'], f"{config['preload']}.pt")
@@ -274,46 +275,90 @@ def train(config):
             optimizer.load_state_dict(state['optimizer_state_dict'])
             initial_epoch = state['epoch'] + 1
             global_step = state['global_step']
+            best_val_loss = state.get('best_val_loss', float('inf'))
+    
+    print(f"Training with {sum(p.numel() for p in model.parameters())} parameters")
     
     for epoch in range(initial_epoch, config['num_epochs']):
         model.train()
         total_loss = 0
+        epoch_steps = 0
+        optimizer.zero_grad()
 
         batch_iterator = tqdm(train_dataloader, desc=f"Training Epoch {epoch+1}/{config['num_epochs']}")
         
-        for batch in batch_iterator:
+        for batch_idx, batch in enumerate(batch_iterator):
             input_ids = batch["input_ids"].to(device)
             labels = batch["labels"].to(device)
             causal_mask = batch["causal_mask"].to(device)
             
-            logits = model(input_ids, causal_mask)
+            with torch.amp.autocast(device_type=device.type):
+                logits = model(input_ids, causal_mask)
+                loss = criterion(logits.view(-1, logits.size(-1)), labels.view(-1))
+                loss = loss / config['gradient_accumulation_steps']
             
-            loss = criterion(logits.view(-1, logits.size(-1)), labels.view(-1))
+            scaler.scale(loss).backward()
             
-            optimizer.zero_grad()
-            loss.backward()
-            
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            
-            optimizer.step()
-            
-            total_loss += loss.item()
-            batch_iterator.set_postfix({"loss": f"{loss.item():.4f}"})
-            
-            writer.add_scalar('train_loss', loss.item(), global_step)
-            global_step += 1
+            if (batch_idx + 1) % config['gradient_accumulation_steps'] == 0:
+                scaler.unscale_(optimizer)
+                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer.zero_grad()
+                
+                total_loss += loss.item() * config['gradient_accumulation_steps']
+                epoch_steps += 1
+                
+                writer.add_scalar('train/loss', loss.item() * config['gradient_accumulation_steps'], global_step)
+                writer.add_scalar('train/grad_norm', grad_norm, global_step)
+                writer.add_scalar('train/learning_rate', optimizer.param_groups[0]['lr'], global_step)
+
+                batch_iterator.set_postfix({
+                    "loss": f"{loss.item() * config['gradient_accumulation_steps']:.4f}",
+                    "perplexity": f"{torch.exp(loss * config['gradient_accumulation_steps']).item():.2f}",
+                    "grad_norm": f"{grad_norm:.2f}"
+                })
+                
+                if global_step % 10 == 0:
+                    writer.flush()
+                
+                global_step += 1
+
+        avg_train_loss = total_loss / epoch_steps
+        train_perplexity = torch.exp(torch.tensor(avg_train_loss)).item()
         
-        avg_train_loss = total_loss / len(train_dataloader)
-        print(f"Epoch {epoch+1} average training loss: {avg_train_loss:.4f}")
+        print(f"\nEpoch {epoch+1} Summary:")
+        print(f"avg training loss: {avg_train_loss:.4f}")
+        print(f"train perplexity: {train_perplexity:.2f}")
         
         val_loss = evaluate(model, val_dataloader, device)
-        print(f"Epoch {epoch+1} validation loss: {val_loss:.4f}")
+        val_perplexity = torch.exp(torch.tensor(val_loss)).item()
         
-        writer.add_scalar('validation_loss', val_loss, epoch)
+        print(f"val loss: {val_loss:.4f}")
+        print(f"val perplexity: {val_perplexity:.2f}")
+        
+        writer.add_scalar('val/loss', val_loss, epoch)
+        writer.add_scalar('val/perplexity', val_perplexity, epoch)
         
         sample_prompt = val_dataloader.dataset.texts[0][:20]
         generated_text = generate_text(model, tokenizer, sample_prompt, device=device)
-        print(f"Sample generation: {generated_text}")
+        writer.add_text('generated_text', generated_text, epoch)
+        print(f"\nSample generation:\nPrompt: {sample_prompt}\nGenerated: {generated_text}")
+        
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            model_filename = os.path.join(config['model_folder'], f"best_model.pt")
+            torch.save({
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'loss': avg_train_loss,
+                'val_loss': val_loss,
+                'best_val_loss': best_val_loss,
+                'global_step': global_step,
+                'config': config
+            }, model_filename)
+            print(f"New best model saved to {model_filename}")
         
         model_filename = os.path.join(config['model_folder'], f"epoch_{epoch+1}.pt")
         torch.save({
@@ -321,13 +366,18 @@ def train(config):
             'model_state_dict': model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
             'loss': avg_train_loss,
-            'global_step': global_step
+            'val_loss': val_loss,
+            'best_val_loss': best_val_loss,
+            'global_step': global_step,
+            'config': config
         }, model_filename)
         
-        print(f"Model saved to {model_filename}")
-    
+        writer.flush()
+        
     writer.close()
-    print("Training complete!")
+    print("\nTraining complete!")
+    print(f"Best val loss: {best_val_loss:.4f}")
+    print(f"Best val perplexity: {torch.exp(torch.tensor(best_val_loss)).item():.2f}")
 
 if __name__ == "__main__":
     import warnings
