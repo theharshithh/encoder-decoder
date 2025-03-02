@@ -25,16 +25,16 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 ### Deps
 ```bash
-uv pip install -r requirements.txt
+uv venv; source .venv/bin/activate; uv pip install -r requirements.txt;
 ```
 ### Start the training
 ```bash
 python train_gpt_2.py
 ```
 
-## The training logs are saved in the `runs/tmodel` folder.
+### The training logs are saved in the `runs/tmodel` folder.
 
-# To check the training logs
+### To check the training logs
 ```bash
 tensorboard --logdir=runs/tmodel --port 6006
 ```
